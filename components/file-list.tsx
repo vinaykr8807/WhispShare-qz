@@ -1,56 +1,115 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { Button } from "@/components/ui/button"
+import { useEffect, useState } from "react"
 import { Card, CardContent } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Download, File, MapPin, Clock, User } from "lucide-react"
+import { Input } from "@/components/ui/input"
+import { FileText, Download, MapPin, Clock, Search, RefreshCw, AlertCircle, Eye } from "lucide-react"
 import { supabase } from "@/lib/supabase"
-import { getCurrentLocation } from "@/lib/location"
+import { formatFileSize, formatDistance, getTimeAgo } from "@/lib/utils"
 import { useToast } from "@/hooks/use-toast"
+import { getCurrentLocation } from "@/lib/location"
 
-interface NearbyFile {
+interface FileItem {
   id: string
   filename: string
   original_name: string
   file_size: number
   mime_type: string
-  storage_path: string
-  latitude: number
-  longitude: number
+  unique_code: string
+  latitude: number | null
+  longitude: number | null
+  distance_meters?: number
   created_at: string
-  distance_meters: number
-  uploader_name: string
+  expires_at: string | null
+  is_downloaded: boolean
+  user_id: string | null
 }
 
-export function FileList() {
-  const [files, setFiles] = useState<NearbyFile[]>([])
+interface FileListProps {
+  limit?: number
+  showHeader?: boolean
+  userId?: string
+}
+
+export function FileList({ limit, showHeader = true, userId }: FileListProps) {
+  const [files, setFiles] = useState<FileItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [searchTerm, setSearchTerm] = useState("")
+  const [filterType, setFilterType] = useState<"all" | "nearby" | "recent">("all")
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null)
   const { toast } = useToast()
 
-  const loadNearbyFiles = async () => {
+  useEffect(() => {
+    fetchFiles()
+    getUserLocation()
+  }, [userId, filterType])
+
+  const getUserLocation = async () => {
+    try {
+      const location = await getCurrentLocation()
+      setUserLocation(location)
+    } catch (error) {
+      console.error("Error getting location:", error)
+    }
+  }
+
+  const fetchFiles = async () => {
     try {
       setLoading(true)
-      const location = await getCurrentLocation()
-      setUserLocation({ lat: location.latitude, lng: location.longitude })
+      let query = supabase.from("files").select("*")
 
-      const { data, error } = await supabase.rpc("get_nearby_files", {
-        user_lat: location.latitude,
-        user_lng: location.longitude,
-        radius_meters: 1000,
-      })
-
-      if (error) {
-        throw error
+      // Filter by user if specified
+      if (userId) {
+        query = query.eq("user_id", userId)
       }
 
-      setFiles(data || [])
+      // Apply filters
+      if (filterType === "recent") {
+        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+        query = query.gte("created_at", dayAgo)
+      }
+
+      // Apply limit
+      if (limit) {
+        query = query.limit(limit)
+      }
+
+      query = query.order("created_at", { ascending: false })
+
+      const { data, error } = await query
+
+      if (error) {
+        console.error("Error fetching files:", error)
+        toast({
+          title: "Error",
+          description: "Failed to load files",
+          variant: "destructive",
+        })
+        return
+      }
+
+      let processedFiles = data || []
+
+      // Calculate distances if user location is available
+      if (userLocation && filterType === "nearby") {
+        processedFiles = processedFiles
+          .filter((file) => file.latitude && file.longitude)
+          .map((file) => {
+            const distance = calculateDistance(userLocation.lat, userLocation.lng, file.latitude!, file.longitude!)
+            return { ...file, distance_meters: distance }
+          })
+          .filter((file) => file.distance_meters! <= 100000) // 100km
+          .sort((a, b) => a.distance_meters! - b.distance_meters!)
+      }
+
+      setFiles(processedFiles)
     } catch (error) {
-      console.error("Error loading nearby files:", error)
+      console.error("Error fetching files:", error)
       toast({
-        title: "Error loading files",
-        description: "Could not load nearby files. Please check your location permissions.",
+        title: "Error",
+        description: "Failed to load files",
         variant: "destructive",
       })
     } finally {
@@ -58,13 +117,47 @@ export function FileList() {
     }
   }
 
-  useEffect(() => {
-    loadNearbyFiles()
-  }, [])
+  const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
+    const R = 6371e3 // Earth's radius in meters
+    const φ1 = (lat1 * Math.PI) / 180
+    const φ2 = (lat2 * Math.PI) / 180
+    const Δφ = ((lat2 - lat1) * Math.PI) / 180
+    const Δλ = ((lng2 - lng1) * Math.PI) / 180
 
-  const downloadFile = async (file: NearbyFile) => {
+    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+
+    return R * c
+  }
+
+  const downloadFile = async (file: FileItem) => {
     try {
-      // Record the download
+      const { data, error } = await supabase.storage.from("files").download(file.storage_path)
+
+      if (error) {
+        console.error("Error downloading file:", error)
+        toast({
+          title: "Download failed",
+          description: "Failed to download file",
+          variant: "destructive",
+        })
+        return
+      }
+
+      // Create download link
+      const url = URL.createObjectURL(data)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = file.original_name
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+
+      // Mark as downloaded
+      await supabase.from("files").update({ is_downloaded: true }).eq("id", file.id)
+
+      // Record download
       const {
         data: { user },
       } = await supabase.auth.getUser()
@@ -75,133 +168,190 @@ export function FileList() {
         })
       }
 
-      // Get signed URL for download
-      const { data, error } = await supabase.storage.from("files").createSignedUrl(file.storage_path, 3600) // 1 hour expiry
-
-      if (error) {
-        throw error
-      }
-
-      // Create download link
-      const link = document.createElement("a")
-      link.href = data.signedUrl
-      link.download = file.original_name
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-
       toast({
-        title: "Download started",
-        description: `Downloading ${file.original_name}`,
+        title: "Download successful",
+        description: `Downloaded ${file.original_name}`,
       })
+
+      // Refresh the list
+      fetchFiles()
     } catch (error) {
-      console.error("Download error:", error)
+      console.error("Error downloading file:", error)
       toast({
         title: "Download failed",
-        description: "Could not download the file. Please try again.",
+        description: "Failed to download file",
         variant: "destructive",
       })
     }
   }
 
-  const formatFileSize = (bytes: number) => {
-    if (bytes === 0) return "0 Bytes"
-    const k = 1024
-    const sizes = ["Bytes", "KB", "MB", "GB"]
-    const i = Math.floor(Math.log(bytes) / Math.log(k))
-    return Number.parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i]
+  const filteredFiles = files.filter(
+    (file) =>
+      file.original_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      file.unique_code.toLowerCase().includes(searchTerm.toLowerCase()),
+  )
+
+  const getFileIcon = (mimeType: string) => {
+    if (mimeType.startsWith("image/")) return "🖼️"
+    if (mimeType.startsWith("video/")) return "🎥"
+    if (mimeType.startsWith("audio/")) return "🎵"
+    if (mimeType.includes("pdf")) return "📄"
+    if (mimeType.includes("document") || mimeType.includes("word")) return "📝"
+    if (mimeType.includes("spreadsheet") || mimeType.includes("excel")) return "📊"
+    return "📁"
   }
 
-  const formatDistance = (meters: number) => {
-    if (meters < 1000) {
-      return `${Math.round(meters)}m away`
-    }
-    return `${(meters / 1000).toFixed(1)}km away`
-  }
-
-  const getTimeAgo = (dateString: string) => {
-    const date = new Date(dateString)
-    const now = new Date()
-    const diffInMinutes = Math.floor((now.getTime() - date.getTime()) / (1000 * 60))
-
-    if (diffInMinutes < 1) return "Just now"
-    if (diffInMinutes < 60) return `${diffInMinutes}m ago`
-    if (diffInMinutes < 1440) return `${Math.floor(diffInMinutes / 60)}h ago`
-    return `${Math.floor(diffInMinutes / 1440)}d ago`
+  const isExpired = (expiresAt: string | null) => {
+    if (!expiresAt) return false
+    return new Date(expiresAt) < new Date()
   }
 
   if (loading) {
     return (
-      <Card>
-        <CardContent className="p-8 text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-500">Finding nearby files...</p>
-        </CardContent>
-      </Card>
-    )
-  }
-
-  if (files.length === 0) {
-    return (
-      <Card>
-        <CardContent className="p-8 text-center">
-          <File className="mx-auto h-12 w-12 text-gray-400 mb-4" />
-          <h3 className="text-lg font-semibold mb-2">No files nearby</h3>
-          <p className="text-gray-500 mb-4">No files are currently shared within 1km of your location.</p>
-          <Button onClick={loadNearbyFiles} variant="outline">
-            Refresh
-          </Button>
-        </CardContent>
-      </Card>
+      <div className="space-y-4">
+        {showHeader && (
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold">Files</h3>
+            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+          </div>
+        )}
+        <div className="space-y-2">
+          {[...Array(3)].map((_, i) => (
+            <div key={i} className="h-16 bg-muted animate-pulse rounded-lg"></div>
+          ))}
+        </div>
+      </div>
     )
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">Nearby Files ({files.length})</h2>
-        <Button onClick={loadNearbyFiles} variant="outline" size="sm">
-          Refresh
-        </Button>
+      {showHeader && (
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold flex items-center gap-2">
+            <FileText className="h-5 w-5" />
+            Files ({filteredFiles.length})
+          </h3>
+          <Button onClick={fetchFiles} variant="outline" size="sm" className="gap-2 bg-transparent">
+            <RefreshCw className="h-4 w-4" />
+            Refresh
+          </Button>
+        </div>
+      )}
+
+      {/* Search and Filters */}
+      <div className="flex flex-col sm:flex-row gap-2">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search files or codes..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="pl-10"
+          />
+        </div>
+        <div className="flex gap-2">
+          <Button variant={filterType === "all" ? "default" : "outline"} size="sm" onClick={() => setFilterType("all")}>
+            All
+          </Button>
+          <Button
+            variant={filterType === "nearby" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setFilterType("nearby")}
+            className="gap-2"
+          >
+            <MapPin className="h-4 w-4" />
+            Nearby
+          </Button>
+          <Button
+            variant={filterType === "recent" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setFilterType("recent")}
+            className="gap-2"
+          >
+            <Clock className="h-4 w-4" />
+            Recent
+          </Button>
+        </div>
       </div>
 
-      <div className="grid gap-4">
-        {files.map((file) => (
-          <Card key={file.id} className="hover:shadow-md transition-shadow">
-            <CardContent className="p-4">
-              <div className="flex items-start justify-between">
-                <div className="flex items-start gap-3 flex-1">
-                  <File className="h-10 w-10 text-blue-500 mt-1" />
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-semibold truncate">{file.original_name}</h3>
-                    <div className="flex items-center gap-4 text-sm text-gray-500 mt-1">
-                      <span className="flex items-center gap-1">
-                        <User className="h-3 w-3" />
-                        {file.uploader_name || "Anonymous"}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <MapPin className="h-3 w-3" />
-                        {formatDistance(file.distance_meters)}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Clock className="h-3 w-3" />
-                        {getTimeAgo(file.created_at)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-2">
-                      <Badge variant="secondary">{formatFileSize(file.file_size)}</Badge>
-                      <Badge variant="outline">{file.mime_type.split("/")[0]}</Badge>
-                    </div>
-                  </div>
-                </div>
-                <Button onClick={() => downloadFile(file)} size="sm" className="ml-4">
-                  <Download className="h-4 w-4 mr-2" />
-                  Download
-                </Button>
+      {/* Files List */}
+      <div className="space-y-2">
+        {filteredFiles.length === 0 ? (
+          <Card>
+            <CardContent className="pt-6">
+              <div className="text-center py-8">
+                <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                <h3 className="text-lg font-semibold mb-2">No files found</h3>
+                <p className="text-muted-foreground">
+                  {searchTerm
+                    ? "Try adjusting your search terms"
+                    : filterType === "nearby"
+                      ? "No files found within 100km of your location"
+                      : "Upload your first file to get started"}
+                </p>
               </div>
             </CardContent>
           </Card>
-        ))}
+        ) : (
+          filteredFiles.map((file) => (
+            <Card
+              key={file.id}
+              className={`transition-all hover:shadow-md ${isExpired(file.expires_at) ? "opacity-60" : ""}`}
+            >
+              <CardContent className="pt-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="text-2xl">{getFileIcon(file.mime_type)}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <h4 className="font-medium truncate">{file.original_name}</h4>
+                        {file.is_downloaded && (
+                          <Badge variant="secondary" className="gap-1">
+                            <Eye className="h-3 w-3" />
+                            Downloaded
+                          </Badge>
+                        )}
+                        {isExpired(file.expires_at) && (
+                          <Badge variant="destructive" className="gap-1">
+                            <AlertCircle className="h-3 w-3" />
+                            Expired
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-4 text-sm text-muted-foreground">
+                        <span>{formatFileSize(file.file_size)}</span>
+                        <span className="flex items-center gap-1">
+                          <Clock className="h-3 w-3" />
+                          {getTimeAgo(file.created_at)}
+                        </span>
+                        {file.distance_meters !== undefined && (
+                          <span className="flex items-center gap-1">
+                            <MapPin className="h-3 w-3" />
+                            {formatDistance(file.distance_meters)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1">
+                        <Badge variant="outline" className="text-xs font-mono">
+                          {file.unique_code}
+                        </Badge>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {!isExpired(file.expires_at) && (
+                      <Button onClick={() => downloadFile(file)} size="sm" className="gap-2">
+                        <Download className="h-4 w-4" />
+                        Download
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))
+        )}
       </div>
     </div>
   )

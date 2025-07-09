@@ -93,7 +93,7 @@
   background: linear-gradient(135deg, #2196f3 0%, #1976d2 100%);
 }
 
-/* Theme-specific gradient overrides (no @apply — avoids circular deps) */
+/* Theme-specific styles */
 [data-theme="light"] .gradient-hero {
   background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
 }

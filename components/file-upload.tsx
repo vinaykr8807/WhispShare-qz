@@ -5,9 +5,11 @@ import { useDropzone } from "react-dropzone"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
-import { Upload, File, X, CheckCircle, AlertCircle } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { Upload, File, X, CheckCircle, AlertCircle, Copy, MapPin } from "lucide-react"
 import { supabase } from "@/lib/supabase"
 import { getCurrentLocation } from "@/lib/location"
+import { generateUniqueCode, formatFileSize } from "@/lib/utils"
 import { useToast } from "@/hooks/use-toast"
 
 interface FileUploadProps {
@@ -19,6 +21,8 @@ interface UploadingFile {
   progress: number
   status: "uploading" | "success" | "error"
   id: string
+  uniqueCode?: string
+  error?: string
 }
 
 export function FileUpload({ onUploadComplete }: FileUploadProps) {
@@ -26,6 +30,16 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
   const { toast } = useToast()
 
   const uploadFile = async (file: File) => {
+    // Check file size (50MB limit)
+    if (file.size > 50 * 1024 * 1024) {
+      toast({
+        title: "File too large",
+        description: "File size must be less than 50MB",
+        variant: "destructive",
+      })
+      return
+    }
+
     const fileId = Math.random().toString(36).substring(7)
 
     setUploadingFiles((prev) => [
@@ -46,63 +60,107 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
       const {
         data: { user },
       } = await supabase.auth.getUser()
-      if (!user) {
-        throw new Error("User not authenticated")
-      }
 
-      // Create unique filename
+      // Generate unique code
+      const uniqueCode = generateUniqueCode()
+
+      // Create unique filename with proper path structure
       const fileExt = file.name.split(".").pop()
       const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`
-      const filePath = `uploads/${user.id}/${fileName}`
+      const filePath = user ? `${user.id}/${fileName}` : `anonymous/${fileName}`
+
+      console.log("Uploading file to path:", filePath)
+
+      // Update progress to 25%
+      setUploadingFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, progress: 25 } : f)))
 
       // Upload file to Supabase Storage
-      const { error: uploadError } = await supabase.storage.from("files").upload(filePath, file, {
-        onUploadProgress: (progress) => {
-          const percentage = (progress.loaded / progress.total) * 100
-          setUploadingFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, progress: percentage } : f)))
-        },
+      const { data: uploadData, error: uploadError } = await supabase.storage.from("files").upload(filePath, file, {
+        cacheControl: "3600",
+        upsert: false,
       })
 
       if (uploadError) {
-        throw uploadError
+        console.error("Storage upload error:", uploadError)
+        throw new Error(`Storage upload failed: ${uploadError.message}`)
       }
+
+      console.log("File uploaded successfully:", uploadData)
+
+      // Update progress to 75% after storage upload
+      setUploadingFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, progress: 75 } : f)))
 
       // Set expiry time (24 hours from now)
       const expiresAt = new Date()
       expiresAt.setHours(expiresAt.getHours() + 24)
 
-      // Save file metadata to database
-      const { error: dbError } = await supabase.from("files").insert({
-        user_id: user.id,
+      // Prepare file record with ALL required fields
+      const fileRecord = {
+        user_id: user?.id || null,
         filename: fileName,
         original_name: file.name,
         file_size: file.size,
-        mime_type: file.type,
+        mime_type: file.type || "application/octet-stream",
         storage_path: filePath,
+        unique_code: uniqueCode,
         latitude: location.latitude,
         longitude: location.longitude,
         expires_at: expiresAt.toISOString(),
-      })
-
-      if (dbError) {
-        throw dbError
+        is_downloaded: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       }
 
-      setUploadingFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, progress: 100, status: "success" } : f)))
+      console.log("Inserting file record:", fileRecord)
+
+      // Insert file record into database
+      const { data: dbData, error: dbError } = await supabase.from("files").insert(fileRecord).select()
+
+      if (dbError) {
+        console.error("Database insert error:", dbError)
+        // Clean up uploaded file if database insert fails
+        await supabase.storage.from("files").remove([filePath])
+        throw new Error(`Database insert failed: ${dbError.message}`)
+      }
+
+      console.log("File record inserted successfully:", dbData)
+
+      // Update location in PostGIS format
+      if (location.latitude && location.longitude) {
+        const { error: locationError } = await supabase
+          .from("files")
+          .update({
+            location: `POINT(${location.longitude} ${location.latitude})`,
+          })
+          .eq("id", dbData[0].id)
+
+        if (locationError) {
+          console.warn("Location update error:", locationError)
+          // Don't fail the upload for location update errors
+        }
+      }
+
+      setUploadingFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, progress: 100, status: "success", uniqueCode } : f)),
+      )
 
       toast({
         title: "File uploaded successfully",
-        description: `${file.name} is now available to nearby users for 24 hours.`,
+        description: `${file.name} is now available with code: ${uniqueCode}`,
       })
 
       onUploadComplete?.()
     } catch (error) {
       console.error("Upload error:", error)
-      setUploadingFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, status: "error" } : f)))
+      const errorMessage = error instanceof Error ? error.message : "Failed to upload file"
+
+      setUploadingFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, status: "error", error: errorMessage } : f)),
+      )
 
       toast({
         title: "Upload failed",
-        description: error instanceof Error ? error.message : "Failed to upload file",
+        description: errorMessage,
         variant: "destructive",
       })
     }
@@ -114,12 +172,20 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    maxSize: 100 * 1024 * 1024, // 100MB
+    maxSize: 50 * 1024 * 1024, // 50MB
     multiple: true,
   })
 
   const removeFile = (id: string) => {
     setUploadingFiles((prev) => prev.filter((f) => f.id !== id))
+  }
+
+  const copyCode = (code: string) => {
+    navigator.clipboard.writeText(code)
+    toast({
+      title: "Code copied",
+      description: "Unique code copied to clipboard",
+    })
   }
 
   return (
@@ -136,8 +202,12 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
             <Upload className="mx-auto h-12 w-12 text-gray-400 mb-4" />
             <h3 className="text-lg font-semibold mb-2">Drop your file here or click to browse</h3>
             <p className="text-sm text-gray-500 mb-4">
-              Maximum file size: 100MB • AI-powered security analysis included
+              Maximum file size: 50MB • AI-powered security analysis included
             </p>
+            <div className="flex items-center justify-center gap-2 mb-4">
+              <MapPin className="h-4 w-4 text-blue-600" />
+              <span className="text-sm text-blue-600">Location-Based Sharing</span>
+            </div>
             <Button>Choose File</Button>
           </div>
         </CardContent>
@@ -156,9 +226,27 @@ export function FileUpload({ onUploadComplete }: FileUploadProps) {
                   <File className="h-8 w-8 text-blue-500" />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium truncate">{uploadingFile.file.name}</p>
-                    <p className="text-xs text-gray-500">{(uploadingFile.file.size / 1024 / 1024).toFixed(2)} MB</p>
+                    <p className="text-xs text-gray-500">{formatFileSize(uploadingFile.file.size)}</p>
                     {uploadingFile.status === "uploading" && (
                       <Progress value={uploadingFile.progress} className="mt-2" />
+                    )}
+                    {uploadingFile.status === "success" && uploadingFile.uniqueCode && (
+                      <div className="flex items-center gap-2 mt-2">
+                        <Badge variant="secondary" className="font-mono">
+                          {uploadingFile.uniqueCode}
+                        </Badge>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => copyCode(uploadingFile.uniqueCode!)}
+                          className="h-6 px-2"
+                        >
+                          <Copy className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    )}
+                    {uploadingFile.status === "error" && uploadingFile.error && (
+                      <p className="text-xs text-red-500 mt-1">{uploadingFile.error}</p>
                     )}
                   </div>
                   <div className="flex items-center gap-2">

@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Create files table with location support
+-- Create files table with location support and unique codes
 CREATE TABLE IF NOT EXISTS files (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
@@ -20,10 +20,12 @@ CREATE TABLE IF NOT EXISTS files (
   file_size BIGINT NOT NULL,
   mime_type TEXT NOT NULL,
   storage_path TEXT NOT NULL,
+  unique_code TEXT UNIQUE NOT NULL,
   location GEOGRAPHY(POINT, 4326),
   latitude DOUBLE PRECISION,
   longitude DOUBLE PRECISION,
   expires_at TIMESTAMP WITH TIME ZONE,
+  is_downloaded BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -38,9 +40,10 @@ CREATE TABLE IF NOT EXISTS downloads (
 
 -- Create spatial index for location queries
 CREATE INDEX IF NOT EXISTS files_location_idx ON files USING GIST (location);
+CREATE INDEX IF NOT EXISTS files_unique_code_idx ON files (unique_code);
 
--- Create function to find nearby files (within 1km)
-CREATE OR REPLACE FUNCTION get_nearby_files(user_lat DOUBLE PRECISION, user_lng DOUBLE PRECISION, radius_meters INTEGER DEFAULT 1000)
+-- Create function to find nearby files (within 5km)
+CREATE OR REPLACE FUNCTION get_nearby_files(user_lat DOUBLE PRECISION, user_lng DOUBLE PRECISION, radius_meters INTEGER DEFAULT 100000)
 RETURNS TABLE (
   id UUID,
   filename TEXT,
@@ -48,6 +51,7 @@ RETURNS TABLE (
   file_size BIGINT,
   mime_type TEXT,
   storage_path TEXT,
+  unique_code TEXT,
   latitude DOUBLE PRECISION,
   longitude DOUBLE PRECISION,
   created_at TIMESTAMP WITH TIME ZONE,
@@ -63,20 +67,45 @@ BEGIN
     f.file_size,
     f.mime_type,
     f.storage_path,
+    f.unique_code,
     f.latitude,
     f.longitude,
     f.created_at,
     ST_Distance(f.location, ST_SetSRID(ST_MakePoint(user_lng, user_lat), 4326)) as distance_meters,
-    p.full_name as uploader_name
+    COALESCE(p.full_name, 'Anonymous') as uploader_name
   FROM files f
-  JOIN profiles p ON f.user_id = p.id
+  LEFT JOIN profiles p ON f.user_id = p.id
   WHERE f.expires_at > NOW()
+    AND f.is_downloaded = FALSE
+    AND f.location IS NOT NULL
     AND ST_DWithin(
       f.location,
       ST_SetSRID(ST_MakePoint(user_lng, user_lat), 4326),
       radius_meters
     )
   ORDER BY distance_meters ASC;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to generate unique code
+CREATE OR REPLACE FUNCTION generate_unique_code()
+RETURNS TEXT AS $$
+DECLARE
+  code TEXT;
+  exists_check BOOLEAN;
+BEGIN
+  LOOP
+    -- Generate 8-character alphanumeric code
+    code := upper(substring(md5(random()::text) from 1 for 8));
+    
+    -- Check if code already exists
+    SELECT EXISTS(SELECT 1 FROM files WHERE unique_code = code) INTO exists_check;
+    
+    -- Exit loop if code is unique
+    EXIT WHEN NOT exists_check;
+  END LOOP;
+  
+  RETURN code;
 END;
 $$ LANGUAGE plpgsql;
 
