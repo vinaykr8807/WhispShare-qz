@@ -92,7 +92,9 @@ export function AIChatbot() {
       console.log("Received response from Gemini:", response)
 
       // Log the interaction for ML analysis
-      await logChatInteraction(content, response, sentiment)
+      logChatInteraction(content, response, sentiment).catch(error => {
+        console.warn("Could not log chat interaction:", error.message)
+      })
 
       const aiMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -103,10 +105,23 @@ export function AIChatbot() {
       setMessages((prev) => [...prev, aiMessage])
     } catch (error) {
       console.error("Error getting AI response:", error)
+      
+      // Provide more specific error messages based on the error type
+      let errorMessage = "I apologize, but I'm experiencing technical difficulties with my ML models. Please try again in a moment."
+      
+      if (error instanceof Error) {
+        if (error.message.includes("overloaded") || error.message.includes("503")) {
+          errorMessage = "I'm currently experiencing high demand. Please try again in a few moments - the service should be available shortly."
+        } else if (error.message.includes("quota") || error.message.includes("429")) {
+          errorMessage = "I've reached my usage limit for now. Please try again in a few minutes."
+        } else if (error.message.includes("network") || error.message.includes("fetch")) {
+          errorMessage = "I'm having connectivity issues. Please check your internet connection and try again."
+        }
+      }
+      
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
-        content:
-          "I apologize, but I'm experiencing technical difficulties with my ML models. Please try again in a moment.",
+        content: errorMessage,
         isUser: false,
         timestamp: new Date(),
       }
@@ -117,28 +132,25 @@ export function AIChatbot() {
   }
 
   const logChatInteraction = async (userMessage: string, aiResponse: string, sentiment: any) => {
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
+    // Attempt to log the interaction, but don't let it fail the main functionality
+    const {
+      data: { user },
+    } = await supabase.auth.getUser()
 
-      // Log to user activity - with error handling for missing table
-      const { error } = await supabase.from("user_activity_logs").insert({
-        user_id: user?.id || null,
-        activity_type: "ai_chat",
-        metadata: {
-          user_message: userMessage,
-          ai_response: aiResponse,
-          sentiment: sentiment,
-          timestamp: new Date().toISOString(),
-        },
-      })
-      
-      if (error) {
-        console.warn("Could not log chat interaction - database table may not exist:", error.message)
-      }
-    } catch (error) {
-      console.warn("Error logging chat interaction:", error)
+    const { error } = await supabase.from("user_activity_logs").insert({
+      user_id: user?.id || null,
+      activity_type: "ai_chat",
+      metadata: {
+        user_message: userMessage,
+        ai_response: aiResponse,
+        sentiment: sentiment,
+        timestamp: new Date().toISOString(),
+      },
+    })
+    
+    if (error) {
+      // Only log as warning, don't throw error
+      console.warn("Could not log chat interaction - database table may not exist:", error.message)
     }
   }
 
