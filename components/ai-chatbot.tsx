@@ -122,8 +122,8 @@ export function AIChatbot() {
         data: { user },
       } = await supabase.auth.getUser()
 
-      // Log to user activity
-      await supabase.from("user_activity_logs").insert({
+      // Log to user activity - with error handling for missing table
+      const { error } = await supabase.from("user_activity_logs").insert({
         user_id: user?.id || null,
         activity_type: "ai_chat",
         metadata: {
@@ -133,8 +133,12 @@ export function AIChatbot() {
           timestamp: new Date().toISOString(),
         },
       })
+      
+      if (error) {
+        console.warn("Could not log chat interaction - database table may not exist:", error.message)
+      }
     } catch (error) {
-      console.error("Error logging chat interaction:", error)
+      console.warn("Error logging chat interaction:", error)
     }
   }
 
