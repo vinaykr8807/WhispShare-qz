@@ -15,13 +15,13 @@ A secure, location-based file sharing platform built with Next.js and Supabase.
 
 ### 1. Environment Variables
 
-Create a `.env.local` file with your Supabase credentials:
+The `.env.local` file is already configured with your Supabase credentials:
 
 ```env
-NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
-GEMINI_API_KEY=your_gemini_api_key
+NEXT_PUBLIC_SUPABASE_URL=https://fcnehpaubkdlepqcbdct.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+GEMINI_API_KEY=AIzaSyCb2ZXTZ5dHUMXNRqpVoI4xtLDZjF4Kdbc
 ```
 
 ### 2. Database Setup
